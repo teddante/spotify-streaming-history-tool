@@ -5,9 +5,21 @@ analysis_report.md
 analysis_results.txt
 
 # Test Data
-test_data/
+test_data*/
 
 # Python artifacts
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+env/
+venv/
+.env
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
