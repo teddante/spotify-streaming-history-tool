@@ -1,8 +1,15 @@
 my_spotify_data/
 
 # Program Outputs
+report.txt
+*.txt
+*.csv
+output/
+results/
 analysis_report.md
 analysis_results.txt
+!README.md
+!requirements.txt
 
 # Test Data
 test_data*/
