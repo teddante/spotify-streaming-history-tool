@@ -171,9 +171,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Spotify Monthly Analysis Tool (FLE Edition)")
     parser.add_argument("--dir", default="my_spotify_data/Spotify Extended Streaming History", help="Directory containing Spotify JSON files")
     parser.add_argument("--top", type=int, default=10, help="Number of top items to show per month")
-    parser.add_argument("--output", help="Path to save the report")
+    parser.add_argument("--output", help="Path to save the report (default: auto-generated timestamp)")
+    parser.add_argument("--no-save", action="store_true", help="Don't save to file, only print to console")
     
     args = parser.parse_args()
     
+    # Generate default output filename with timestamp if not specified
+    if args.no_save:
+        output_file = None
+    elif args.output:
+        output_file = args.output
+    else:
+        # Create output folder if it doesn't exist
+        output_dir = Path("output")
+        output_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = output_dir / f"report_{timestamp}.txt"
+    
     report = load_and_analyze(args.dir, top_n=args.top)
-    print_report(report, output_file=args.output)
+    print_report(report, output_file=output_file)
+

@@ -18,9 +18,9 @@ class TestMonthlyAnalysis(unittest.TestCase):
         
         jan = report["2023-01"]
         self.assertEqual(jan["songs"][0]["name"], "Song A")
-        self.assertEqual(jan["songs"][0]["count"], 2)
+        self.assertEqual(jan["songs"][0]["score"], 2.0)  # FLE: 2 full listens = 2.0
         self.assertEqual(jan["artists"][0]["name"], "Artist X")
-        self.assertEqual(jan["artists"][0]["count"], 2)
+        self.assertEqual(jan["artists"][0]["score"], 2.0)  # FLE: 2 full listens = 2.0
 
     def test_null_handling(self):
         data = [
