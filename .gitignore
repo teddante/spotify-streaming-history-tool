@@ -1,0 +1,13 @@
+my_spotify_data/
+
+# Program Outputs
+analysis_report.md
+analysis_results.txt
+
+# Test Data
+test_data/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
