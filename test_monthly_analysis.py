@@ -16,11 +16,21 @@ class TestMonthlyAnalysis(unittest.TestCase):
         self.analyzer.process_data(data)
         report = self.analyzer.get_report(top_n=10)
         
-        jan = report["2023-01"]
+        jan = report["monthly"]["2023-01"]
         self.assertEqual(jan["songs"][0]["name"], "Song A")
         self.assertEqual(jan["songs"][0]["score"], 2.0)  # FLE: 2 full listens = 2.0
         self.assertEqual(jan["artists"][0]["name"], "Artist X")
         self.assertEqual(jan["artists"][0]["score"], 2.0)  # FLE: 2 full listens = 2.0
+        
+        # Test yearly aggregation
+        year_2023 = report["yearly"]["2023"]
+        self.assertEqual(year_2023["songs"][0]["name"], "Song A")
+        self.assertEqual(year_2023["songs"][0]["score"], 2.0)
+        
+        # Test all-time aggregation
+        alltime = report["alltime"]
+        self.assertEqual(alltime["songs"][0]["name"], "Song A")
+        self.assertEqual(alltime["songs"][0]["score"], 2.0)
 
     def test_null_handling(self):
         data = [
@@ -29,7 +39,7 @@ class TestMonthlyAnalysis(unittest.TestCase):
         ]
         self.analyzer.process_data(data)
         report = self.analyzer.get_report()
-        jan = report["2023-01"]
+        jan = report["monthly"]["2023-01"]
         # Should ignore the null entry
         self.assertEqual(len(jan["songs"]), 1)
         self.assertEqual(jan["songs"][0]["name"], "Real Song")
@@ -42,7 +52,7 @@ class TestMonthlyAnalysis(unittest.TestCase):
         self.analyzer.process_data(data)
         report = self.analyzer.get_report()
         # Months should be sorted
-        months = list(report.keys())
+        months = list(report["monthly"].keys())
         self.assertEqual(months, ["2023-01", "2023-02"])
 
     def test_configurable_top_n(self):
@@ -52,7 +62,9 @@ class TestMonthlyAnalysis(unittest.TestCase):
         
         self.analyzer.process_data(data)
         report = self.analyzer.get_report(top_n=5)
-        self.assertEqual(len(report["2023-01"]["songs"]), 5)
+        self.assertEqual(len(report["monthly"]["2023-01"]["songs"]), 5)
+        self.assertEqual(len(report["yearly"]["2023"]["songs"]), 5)
+        self.assertEqual(len(report["alltime"]["songs"]), 5)
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,10 @@ class SpotifyAnalyzer:
     def __init__(self):
         # monthly_data[month]["songs"][(lower_t, lower_a)] = total_ms_played
         self.monthly_data = defaultdict(lambda: {"songs": Counter(), "artists": Counter()})
+        # yearly_data[year]["songs"][(lower_t, lower_a)] = total_ms_played
+        self.yearly_data = defaultdict(lambda: {"songs": Counter(), "artists": Counter()})
+        # alltime_data["songs"][(lower_t, lower_a)] = total_ms_played
+        self.alltime_data = {"songs": Counter(), "artists": Counter()}
         # Track max duration and display names globally
         # stats[(lower_t, lower_a)] = {"max_ms": ms, "track_name": "Name", "artist_name": "Artist"}
         self.global_track_stats = defaultdict(lambda: {"max_ms": 1, "track_name": "", "artist_name": ""})
@@ -73,47 +77,72 @@ class SpotifyAnalyzer:
             
             # Increment monthly totals
             self.monthly_data[month_key]["songs"][track_id] += ms_played
+            
+            # Increment yearly totals
+            year_key = ts[:4]  # YYYY
+            self.yearly_data[year_key]["songs"][track_id] += ms_played
+            
+            # Increment all-time totals
+            self.alltime_data["songs"][track_id] += ms_played
+            
             self.stats["processed"] += 1
 
+    def _calculate_fle_rankings(self, song_data, top_n):
+        """Helper to calculate FLE rankings from a songs Counter."""
+        song_metrics = []  # List of (track_id, fle_score)
+        artist_scores = Counter()  # lower_a -> sum(fle)
+        
+        for track_id, total_ms in song_data.items():
+            max_ms = self.global_track_stats[track_id]["max_ms"]
+            fle_score = total_ms / max_ms if max_ms > 0 else 0
+            song_metrics.append((track_id, fle_score))
+            artist_scores[track_id[1]] += fle_score
+        
+        top_songs = sorted(song_metrics, key=lambda x: x[1], reverse=True)[:top_n]
+        top_artists = artist_scores.most_common(top_n)
+        
+        return {
+            "songs": [
+                {
+                    "name": self.global_track_stats[tid]["track_name"],
+                    "artist": self.global_track_stats[tid]["artist_name"],
+                    "score": round(score, 2)
+                } for tid, score in top_songs
+            ],
+            "artists": [
+                {
+                    "name": self._find_artist_display(aid),
+                    "score": round(score, 2)
+                } for aid, score in top_artists
+            ]
+        }
+
     def get_report(self, top_n=10):
-        """returns a sorted dictionary of monthly summaries ranked by FLE."""
-        report = {}
+        """Returns a dictionary with monthly, yearly, and all-time summaries ranked by FLE."""
+        # Monthly report
+        monthly_report = {}
         for month in sorted(self.monthly_data.keys()):
-            data = self.monthly_data[month]
-            
-            # Calculate FLE for all songs in this month
-            song_metrics = [] # List of (track_id, fle_score)
-            month_artist_scores = Counter() # lower_a -> sum(fle)
-            
-            for track_id, total_ms in data["songs"].items():
-                max_ms = self.global_track_stats[track_id]["max_ms"]
-                fle_score = total_ms / max_ms if max_ms > 0 else 0
-                song_metrics.append((track_id, fle_score))
-                
-                # Assign FLE to the artist
-                month_artist_scores[track_id[1]] += fle_score
-                
-            # Rank Songs
-            top_songs = sorted(song_metrics, key=lambda x: x[1], reverse=True)[:top_n]
-            # Rank Artists
-            top_artists = month_artist_scores.most_common(top_n)
-            
-            report[month] = {
-                "songs": [
-                    {
-                        "name": self.global_track_stats[tid]["track_name"],
-                        "artist": self.global_track_stats[tid]["artist_name"],
-                        "score": round(score, 2)
-                    } for tid, score in top_songs
-                ],
-                "artists": [
-                    {
-                        "name": self.global_track_stats[(None, aid)]["artist_name"] if (None, aid) in self.global_track_stats else self._find_artist_display(aid),
-                        "score": round(score, 2)
-                    } for aid, score in top_artists
-                ]
-            }
-        return report
+            monthly_report[month] = self._calculate_fle_rankings(
+                self.monthly_data[month]["songs"], top_n
+            )
+        
+        # Yearly report
+        yearly_report = {}
+        for year in sorted(self.yearly_data.keys()):
+            yearly_report[year] = self._calculate_fle_rankings(
+                self.yearly_data[year]["songs"], top_n
+            )
+        
+        # All-time report
+        alltime_report = self._calculate_fle_rankings(
+            self.alltime_data["songs"], top_n
+        )
+        
+        return {
+            "monthly": monthly_report,
+            "yearly": yearly_report,
+            "alltime": alltime_report
+        }
 
     def _find_artist_display(self, lower_artist):
         # Fallback to find a display name for an artist from the global tracks
@@ -143,19 +172,42 @@ def load_and_analyze(data_dir, top_n=10):
     print(f"Stats: {analyzer.stats['duplicates']} duplicates skipped, {analyzer.stats['skipped']} malformed records skipped.")
     return analyzer.get_report(top_n=top_n)
 
+def _format_section(title, data):
+    """Format a single section (artists + songs) for output."""
+    section = f"\n=== {title} ===\n"
+    section += "Top Artists (by Full Listen Equivalents):\n"
+    for i, artist in enumerate(data["artists"], 1):
+        section += f"  {i}. {artist['name']} ({artist['score']} FLE)\n"
+    
+    section += "\nTop Songs (by Full Listen Equivalents):\n"
+    for i, song in enumerate(data["songs"], 1):
+        section += f"  {i}. {song['name']} by {song['artist']} ({song['score']} FLE)\n"
+    
+    return section
+
+
 def print_report(report, output_file=None):
     output_str = ""
-    for month, data in report.items():
-        month_section = f"\n=== {month} ===\n"
-        month_section += "Top Artists (by Full Listen Equivalents):\n"
-        for i, artist in enumerate(data["artists"], 1):
-            month_section += f"  {i}. {artist['name']} ({artist['score']} FLE)\n"
-            
-        month_section += "\nTop Songs (by Full Listen Equivalents):\n"
-        for i, song in enumerate(data["songs"], 1):
-            month_section += f"  {i}. {song['name']} by {song['artist']} ({song['score']} FLE)\n"
-        
-        output_str += month_section
+    
+    # Monthly section
+    output_str += "\n" + "=" * 60 + "\n"
+    output_str += "                    MONTHLY TOP LISTS\n"
+    output_str += "=" * 60 + "\n"
+    for month, data in report["monthly"].items():
+        output_str += _format_section(month, data)
+    
+    # Yearly section
+    output_str += "\n" + "=" * 60 + "\n"
+    output_str += "                    YEARLY TOP LISTS\n"
+    output_str += "=" * 60 + "\n"
+    for year, data in report["yearly"].items():
+        output_str += _format_section(year, data)
+    
+    # All-time section
+    output_str += "\n" + "=" * 60 + "\n"
+    output_str += "                   ALL-TIME TOP LISTS\n"
+    output_str += "=" * 60 + "\n"
+    output_str += _format_section("All-Time", report["alltime"])
 
     print(output_str)
     
