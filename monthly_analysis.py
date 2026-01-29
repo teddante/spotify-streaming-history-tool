@@ -7,99 +7,160 @@ from datetime import datetime
 
 class SpotifyAnalyzer:
     def __init__(self):
-        # monthly_data[month]["songs"][(lower_t, lower_a)] = total_ms_played
         self.monthly_data = defaultdict(lambda: {"songs": Counter(), "artists": Counter()})
-        # yearly_data[year]["songs"][(lower_t, lower_a)] = total_ms_played
         self.yearly_data = defaultdict(lambda: {"songs": Counter(), "artists": Counter()})
-        # alltime_data["songs"][(lower_t, lower_a)] = total_ms_played
         self.alltime_data = {"songs": Counter(), "artists": Counter()}
-        # Track max duration and display names globally
-        # stats[(lower_t, lower_a)] = {"max_ms": ms, "track_name": "Name", "artist_name": "Artist"}
-        self.global_track_stats = defaultdict(lambda: {"max_ms": 1, "track_name": "", "artist_name": ""})
+        
+        self.duration_index = defaultdict(Counter)
+        # stats[track_id] = {"ref_ms": ms, "trust": 0.0, "name": "", "artist": ""}
+        self.global_track_stats = defaultdict(lambda: {"ref_ms": 1, "trust": 0.0, "track_name": "", "artist_name": ""})
+        
+        self.all_records = []
         self.processed_ids = set()
-        self.stats = {"processed": 0, "skipped": 0, "duplicates": 0}
+        self.stats = {"processed": 0, "skipped": 0, "duplicates": 0, "repaired": 0, "fused": 0}
 
     def _normalize(self, text):
         return str(text).strip() if text else ""
 
-    def process_data(self, records):
-        """Processes a list of Spotify history records."""
-        if not isinstance(records, list):
-            self.stats["skipped"] += 1
-            return
+    def _print_progress(self, current, total, prefix="Progress"):
+        percent = (current / total) * 100
+        bar = "#" * int(percent // 2)
+        print(f"\r{prefix}: [{bar:<50}] {percent:.1f}%", end="", flush=True)
+        if current >= total:
+            print()
 
+    def collect_records(self, records):
+        """Pass 1 Pre-step: Just collect all records for global analysis."""
+        if not isinstance(records, list): return
         for record in records:
-            if not isinstance(record, dict):
-                self.stats["skipped"] += 1
-                continue
-
-            ts = record.get("ts")
-            ms_played = record.get("ms_played", 0)
-            if ms_played is None: ms_played = 0
+            if not isinstance(record, dict): continue
             
-            # Primary fields for Music
-            track = self._normalize(record.get("master_metadata_track_name"))
-            artist = self._normalize(record.get("master_metadata_album_artist_name"))
+            ts_str = record.get("ts")
+            if not ts_str: continue
             
-            # Fallback for Podcasts/Videos
-            if not track:
-                track = self._normalize(record.get("episode_name"))
-            if not artist:
-                artist = self._normalize(record.get("episode_show_name"))
-            
-            if not ts or not track or not artist:
-                self.stats["skipped"] += 1
-                continue
-
-            # De-duplication
-            record_id = (ts, ms_played, track.lower(), artist.lower())
-            if record_id in self.processed_ids:
-                self.stats["duplicates"] += 1
-                continue
-            self.processed_ids.add(record_id)
-                
             try:
-                month_key = ts[:7] # YYYY-MM
-                datetime.strptime(month_key, "%Y-%m")
+                ts = datetime.strptime(ts_str, "%Y-%m-%dT%H:%M:%SZ")
+                track = self._normalize(record.get("master_metadata_track_name") or record.get("episode_name"))
+                artist = self._normalize(record.get("master_metadata_album_artist_name") or record.get("episode_show_name"))
+                ms_played = record.get("ms_played", 0) or 0
+                
+                if not track or not artist: continue
+                
+                track_id = (track.lower(), artist.lower())
+                
+                # Internal de-duplication
+                record_id = (ts_str, ms_played, track_id)
+                if record_id in self.processed_ids:
+                    self.stats["duplicates"] += 1
+                    continue
+                self.processed_ids.add(record_id)
+                
+                # Store display name on first encounter (O(1) later)
+                if not self.global_track_stats[track_id]["track_name"]:
+                    self.global_track_stats[track_id]["track_name"] = track
+                    self.global_track_stats[track_id]["artist_name"] = artist
+
+                self.all_records.append({
+                    "ts": ts,
+                    "ts_str": ts_str,
+                    "ms_played": ms_played,
+                    "track_id": track_id
+                })
+                
+                # Early index build for durations
+                if ms_played > 5000:
+                    self.duration_index[track_id][ms_played] += 1
             except (ValueError, TypeError):
-                self.stats["skipped"] += 1
                 continue
+
+    def finalize_durations(self):
+        """Pass 1 Finish: Calculate reference duration and Bayesian Trust Score."""
+        items = list(self.duration_index.items())
+        total = len(items)
+        for i, (track_id, counts) in enumerate(items):
+            if i % 100 == 0:
+                self._print_progress(i, total, prefix="Analyzing Stats")
             
-            t_low, a_low = track.lower(), artist.lower()
-            track_id = (t_low, a_low)
+            if not counts: continue
             
-            # Global tracking (Always use Max MS regardless of skip flag for robustness)
-            self.global_track_stats[track_id]["max_ms"] = max(self.global_track_stats[track_id]["max_ms"], ms_played)
-            # Store first encountered display name (or could update to keep latest/most frequent)
-            if not self.global_track_stats[track_id]["track_name"]:
-                self.global_track_stats[track_id]["track_name"] = track
-                self.global_track_stats[track_id]["artist_name"] = artist
+            most_common = counts.most_common()
+            max_freq = most_common[0][1]
+            modes = [val for val, freq in most_common if freq == max_freq]
+            ref_ms = max(modes)
             
-            # Increment monthly totals
-            self.monthly_data[month_key]["songs"][track_id] += ms_played
+            total_plays = sum(counts.values())
+            full_listens = sum(freq for val, freq in counts.items() if val >= 0.8 * ref_ms)
+            trust = full_listens / total_plays if total_plays > 0 else 0.0
             
-            # Increment yearly totals
-            year_key = ts[:4]  # YYYY
-            self.yearly_data[year_key]["songs"][track_id] += ms_played
+            self.global_track_stats[track_id].update({
+                "ref_ms": ref_ms,
+                "trust": trust
+            })
+        self._print_progress(total, total, prefix="Analyzing Stats")
+
+    def process_data(self):
+        """Pass 2: Global Chronological Processing with Fragment Fusion and Gap Repair."""
+        if not self.all_records: return
+        
+        print("Sorting records chronologically...")
+        self.all_records.sort(key=lambda x: x["ts"])
+        
+        prev_record = None
+        total = len(self.all_records)
+        
+        for i, curr in enumerate(self.all_records):
+            if i % 500 == 0:
+                self._print_progress(i, total, prefix="Applying Physics")
             
-            # Increment all-time totals
-            self.alltime_data["songs"][track_id] += ms_played
+            track_id = curr["track_id"]
+            stats = self.global_track_stats[track_id]
+            ref_ms = stats["ref_ms"]
+            reported_ms = curr["ms_played"]
+            
+            # --- PHASE A: FRAGMENT FUSION ---
+            if prev_record and prev_record["track_id"] == track_id:
+                gap_ms = (curr["ts"] - prev_record["ts"]).total_seconds() * 1000
+                if gap_ms < 1000:
+                    self.stats["fused"] += 1
+                    continue 
+
+            # --- PHASE B: PHYSICAL EVIDENCE (GAP REPAIR) ---
+            effective_ms = reported_ms
+            
+            if i + 1 < len(self.all_records):
+                next_rec = self.all_records[i+1]
+                gap_ms = (next_rec["ts"] - curr["ts"]).total_seconds() * 1000
+                
+                if reported_ms < 0.15 * ref_ms and gap_ms > 0.8 * ref_ms and gap_ms < 1.2 * ref_ms:
+                    if stats["trust"] > 0.5:
+                        effective_ms = ref_ms
+                        self.stats["repaired"] += 1
+
+            # --- PHASE C: SCORE CALCULATION ---
+            if effective_ms < 5000: continue
+            
+            record_fle = min(effective_ms / ref_ms, 2.0) if ref_ms > 0 else 0
+            
+            ts_str = curr["ts_str"]
+            month_key, year_key = ts_str[:7], ts_str[:4]
+            artist_low = track_id[1]
+            
+            self.monthly_data[month_key]["songs"][track_id] += record_fle
+            self.monthly_data[month_key]["artists"][artist_low] += record_fle
+            self.yearly_data[year_key]["songs"][track_id] += record_fle
+            self.yearly_data[year_key]["artists"][artist_low] += record_fle
+            self.alltime_data["songs"][track_id] += record_fle
+            self.alltime_data["artists"][artist_low] += record_fle
             
             self.stats["processed"] += 1
+            prev_record = curr
+        
+        self._print_progress(total, total, prefix="Applying Physics")
 
-    def _calculate_fle_rankings(self, song_data, top_n):
-        """Helper to calculate FLE rankings from a songs Counter."""
-        song_metrics = []  # List of (track_id, fle_score)
-        artist_scores = Counter()  # lower_a -> sum(fle)
-        
-        for track_id, total_ms in song_data.items():
-            max_ms = self.global_track_stats[track_id]["max_ms"]
-            fle_score = total_ms / max_ms if max_ms > 0 else 0
-            song_metrics.append((track_id, fle_score))
-            artist_scores[track_id[1]] += fle_score
-        
-        top_songs = sorted(song_metrics, key=lambda x: x[1], reverse=True)[:top_n]
-        top_artists = artist_scores.most_common(top_n)
+    def _calculate_fle_rankings(self, context_data, top_n):
+        """Helper to format pre-calculated FLE scores."""
+        top_songs = context_data["songs"].most_common(top_n)
+        top_artists = context_data["artists"].most_common(top_n)
         
         return {
             "songs": [
@@ -123,19 +184,19 @@ class SpotifyAnalyzer:
         monthly_report = {}
         for month in sorted(self.monthly_data.keys()):
             monthly_report[month] = self._calculate_fle_rankings(
-                self.monthly_data[month]["songs"], top_n
+                self.monthly_data[month], top_n
             )
         
         # Yearly report
         yearly_report = {}
         for year in sorted(self.yearly_data.keys()):
             yearly_report[year] = self._calculate_fle_rankings(
-                self.yearly_data[year]["songs"], top_n
+                self.yearly_data[year], top_n
             )
         
         # All-time report
         alltime_report = self._calculate_fle_rankings(
-            self.alltime_data["songs"], top_n
+            self.alltime_data, top_n
         )
         
         return {
@@ -160,16 +221,25 @@ def load_and_analyze(data_dir, top_n=10):
         print(f"No streaming history files found in {data_dir}")
         return {}
 
+    # Pass 1: Collect all records and build duration count
+    print(f"Pass 1: Collecting records and analyzing durations...")
     for file_path in json_files:
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                analyzer.process_data(data)
+                analyzer.collect_records(data)
         except (json.JSONDecodeError, IOError) as e:
             print(f"Error reading {file_path}: {e}")
+    
+    analyzer.finalize_durations()
+
+    # Pass 2: Global Chronological Processing
+    print(f"Pass 2: Chronological processing (Gap analysis & Repair)...")
+    analyzer.process_data()
             
-    print(f"Processing complete: {analyzer.stats['processed']} records loaded.")
-    print(f"Stats: {analyzer.stats['duplicates']} duplicates skipped, {analyzer.stats['skipped']} malformed records skipped.")
+    print(f"Processing complete: {analyzer.stats['processed']} valid listens processed.")
+    print(f"Stats: {analyzer.stats['duplicates']} duplicates skipped, {analyzer.stats['fused']} fragments fused.")
+    print(f"Heuristics: {analyzer.stats['repaired']} negative glitches repaired via Wall-Clock Evidence.")
     return analyzer.get_report(top_n=top_n)
 
 def _format_section(title, data):
