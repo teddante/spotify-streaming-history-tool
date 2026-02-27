@@ -82,11 +82,11 @@ class TestMonthlyAnalysis(unittest.TestCase):
         rankings = report["monthly_rankings"]
 
         # January has more streams (2 vs 1)
-        self.assertEqual(rankings["by_streams"][0]["month"], "2023-01")
+        self.assertEqual(rankings["by_streams"][0]["period"], "2023-01")
         self.assertEqual(rankings["by_streams"][0]["streams"], 2)
 
         # February has more listening time (600000ms vs 360000ms)
-        self.assertEqual(rankings["by_listening_time"][0]["month"], "2023-02")
+        self.assertEqual(rankings["by_listening_time"][0]["period"], "2023-02")
         self.assertEqual(rankings["by_listening_time"][0]["listening_ms"], 600000)
         self.assertIn("balanced_score", rankings["by_balanced_composite"][0])
 
@@ -115,6 +115,21 @@ class TestMonthlyAnalysis(unittest.TestCase):
         self.assertEqual(jan["song_rankings"]["by_listening_time"][0]["listening_ms"], 600000)
         self.assertIn("balanced_score", jan["artist_rankings"]["by_balanced_composite"][0])
         self.assertIn("balanced_score", jan["song_rankings"]["by_balanced_composite"][0])
+
+    def test_quarterly_and_yearly_balanced_rankings_present(self):
+        data = [
+            {"ts": "2023-01-01T10:00:00Z", "master_metadata_track_name": "Song A", "master_metadata_album_artist_name": "Artist X", "ms_played": 180000},
+            {"ts": "2023-02-01T10:00:00Z", "master_metadata_track_name": "Song B", "master_metadata_album_artist_name": "Artist Y", "ms_played": 180000},
+            {"ts": "2023-04-01T10:00:00Z", "master_metadata_track_name": "Song C", "master_metadata_album_artist_name": "Artist Z", "ms_played": 180000},
+        ]
+        self._run_analysis(data)
+        report = self.analyzer.get_report(top_n=10)
+
+        self.assertIn("2023-Q1", report["quarterly"])
+        self.assertIn("2023-Q2", report["quarterly"])
+        self.assertIn("2023", report["yearly_balanced"])
+        self.assertEqual(report["quarterly_rankings"]["by_streams"][0]["period"], "2023-Q1")
+        self.assertEqual(report["yearly_rankings"]["by_streams"][0]["period"], "2023")
 
 if __name__ == "__main__":
     unittest.main()
