@@ -71,5 +71,50 @@ class TestMonthlyAnalysis(unittest.TestCase):
         self.assertEqual(len(report["yearly"]["2023"]["songs"]), 5)
         self.assertEqual(len(report["alltime"]["songs"]), 5)
 
+    def test_monthly_rankings_streams_and_time(self):
+        data = [
+            {"ts": "2023-01-01T10:00:00Z", "master_metadata_track_name": "Song A", "master_metadata_album_artist_name": "Artist X", "ms_played": 180000},
+            {"ts": "2023-01-02T10:00:00Z", "master_metadata_track_name": "Song B", "master_metadata_album_artist_name": "Artist Y", "ms_played": 180000},
+            {"ts": "2023-02-01T10:00:00Z", "master_metadata_track_name": "Song C", "master_metadata_album_artist_name": "Artist Z", "ms_played": 600000},
+        ]
+        self._run_analysis(data)
+        report = self.analyzer.get_report()
+        rankings = report["monthly_rankings"]
+
+        # January has more streams (2 vs 1)
+        self.assertEqual(rankings["by_streams"][0]["month"], "2023-01")
+        self.assertEqual(rankings["by_streams"][0]["streams"], 2)
+
+        # February has more listening time (600000ms vs 360000ms)
+        self.assertEqual(rankings["by_listening_time"][0]["month"], "2023-02")
+        self.assertEqual(rankings["by_listening_time"][0]["listening_ms"], 600000)
+        self.assertIn("balanced_score", rankings["by_balanced_composite"][0])
+
+    def test_monthly_song_and_artist_rankings_by_streams_and_time(self):
+        data = [
+            # Song A / Artist X -> more streams in January
+            {"ts": "2023-01-01T10:00:00Z", "master_metadata_track_name": "Song A", "master_metadata_album_artist_name": "Artist X", "ms_played": 180000},
+            {"ts": "2023-01-02T10:00:00Z", "master_metadata_track_name": "Song A", "master_metadata_album_artist_name": "Artist X", "ms_played": 180000},
+            # Song B / Artist Y -> fewer streams but longer total time
+            {"ts": "2023-01-03T10:00:00Z", "master_metadata_track_name": "Song B", "master_metadata_album_artist_name": "Artist Y", "ms_played": 600000},
+        ]
+        self._run_analysis(data)
+        report = self.analyzer.get_report(top_n=10)
+        jan = report["monthly"]["2023-01"]
+
+        # Artist rankings
+        self.assertEqual(jan["artist_rankings"]["by_streams"][0]["name"], "Artist X")
+        self.assertEqual(jan["artist_rankings"]["by_streams"][0]["streams"], 2)
+        self.assertEqual(jan["artist_rankings"]["by_listening_time"][0]["name"], "Artist Y")
+        self.assertEqual(jan["artist_rankings"]["by_listening_time"][0]["listening_ms"], 600000)
+
+        # Song rankings
+        self.assertEqual(jan["song_rankings"]["by_streams"][0]["name"], "Song A")
+        self.assertEqual(jan["song_rankings"]["by_streams"][0]["streams"], 2)
+        self.assertEqual(jan["song_rankings"]["by_listening_time"][0]["name"], "Song B")
+        self.assertEqual(jan["song_rankings"]["by_listening_time"][0]["listening_ms"], 600000)
+        self.assertIn("balanced_score", jan["artist_rankings"]["by_balanced_composite"][0])
+        self.assertIn("balanced_score", jan["song_rankings"]["by_balanced_composite"][0])
+
 if __name__ == "__main__":
     unittest.main()

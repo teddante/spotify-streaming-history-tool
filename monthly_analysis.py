@@ -10,6 +10,13 @@ import re
 class SpotifyAnalyzer:
     def __init__(self):
         self.monthly_data = defaultdict(lambda: {"songs": Counter(), "artists": Counter()})
+        self.monthly_summary = defaultdict(lambda: {"streams": 0, "listening_ms": 0})
+        self.monthly_entity_metrics = defaultdict(
+            lambda: {
+                "songs": defaultdict(lambda: {"streams": 0, "listening_ms": 0, "fle": 0.0}),
+                "artists": defaultdict(lambda: {"streams": 0, "listening_ms": 0, "fle": 0.0})
+            }
+        )
         self.yearly_data = defaultdict(lambda: {"songs": Counter(), "artists": Counter()})
         self.alltime_data = {"songs": Counter(), "artists": Counter()}
         
@@ -184,6 +191,14 @@ class SpotifyAnalyzer:
             
             self.monthly_data[month_key]["songs"][track_id] += record_fle
             self.monthly_data[month_key]["artists"][artist_low] += record_fle
+            self.monthly_summary[month_key]["streams"] += 1
+            self.monthly_summary[month_key]["listening_ms"] += int(max(effective_ms, 0))
+            self.monthly_entity_metrics[month_key]["songs"][track_id]["streams"] += 1
+            self.monthly_entity_metrics[month_key]["songs"][track_id]["listening_ms"] += int(max(effective_ms, 0))
+            self.monthly_entity_metrics[month_key]["songs"][track_id]["fle"] += record_fle
+            self.monthly_entity_metrics[month_key]["artists"][artist_low]["streams"] += 1
+            self.monthly_entity_metrics[month_key]["artists"][artist_low]["listening_ms"] += int(max(effective_ms, 0))
+            self.monthly_entity_metrics[month_key]["artists"][artist_low]["fle"] += record_fle
             self.yearly_data[year_key]["songs"][track_id] += record_fle
             self.yearly_data[year_key]["artists"][artist_low] += record_fle
             self.alltime_data["songs"][track_id] += record_fle
@@ -274,6 +289,7 @@ class SpotifyAnalyzer:
                 "entropy": self.monthly_entropy
             },
             "monthly": {},
+            "monthly_rankings": self._calculate_monthly_rankings(),
             "yearly": {},
             "alltime": self._calculate_fle_rankings(self.alltime_data, top_n)
         }
@@ -292,13 +308,117 @@ class SpotifyAnalyzer:
             artist["binge_index"] = round(peak_fle / artist["score"], 2) if artist["score"] > 0 else 0
 
         for month, data in sorted(self.monthly_data.items()):
-            report["monthly"][month] = self._calculate_fle_rankings(data, top_n)
-            report["monthly"][month]["entropy"] = round(self.monthly_entropy.get(month, 0), 2)
+            month_entity_rankings = self._calculate_month_entity_rankings(month, top_n)
+            report["monthly"][month] = {
+                # Backward compatibility: existing consumers expect these keys
+                "artists": month_entity_rankings["artists"]["by_fle"],
+                "songs": month_entity_rankings["songs"]["by_fle"],
+                "artist_rankings": month_entity_rankings["artists"],
+                "song_rankings": month_entity_rankings["songs"],
+                "entropy": round(self.monthly_entropy.get(month, 0), 2)
+            }
             
         for year, data in sorted(self.yearly_data.items()):
             report["yearly"][year] = self._calculate_fle_rankings(data, top_n)
             
         return report
+
+    def _calculate_monthly_rankings(self):
+        rows = []
+        for month, summary in self.monthly_summary.items():
+            fle_total = round(sum(self.monthly_data[month]["songs"].values()), 2)
+            total_ms = int(summary["listening_ms"])
+            rows.append({
+                "month": month,
+                "streams": int(summary["streams"]),
+                "listening_ms": total_ms,
+                "listening_hours": round(total_ms / 3_600_000, 2),
+                "fle_total": fle_total
+            })
+
+        rows = self._add_balanced_scores(
+            rows,
+            [("streams", False), ("listening_ms", False), ("fle_total", False)]
+        )
+
+        return {
+            "by_streams": sorted(rows, key=lambda x: (x["streams"], x["month"]), reverse=True),
+            "by_listening_time": sorted(rows, key=lambda x: (x["listening_ms"], x["month"]), reverse=True),
+            "by_fle": sorted(rows, key=lambda x: (x["fle_total"], x["month"]), reverse=True),
+            "by_balanced_composite": sorted(rows, key=lambda x: (x["balanced_score"], x["month"]), reverse=True)
+        }
+
+    def _calculate_month_entity_rankings(self, month_key, top_n):
+        month_metrics = self.monthly_entity_metrics[month_key]
+
+        artist_rows = []
+        for low_artist, metrics in month_metrics["artists"].items():
+            artist_rows.append({
+                "name": self._find_artist_display(low_artist),
+                "streams": int(metrics["streams"]),
+                "listening_ms": int(metrics["listening_ms"]),
+                "listening_hours": round(int(metrics["listening_ms"]) / 3_600_000, 2),
+                "score": round(metrics["fle"], 2)
+            })
+
+        song_rows = []
+        for track_id, metrics in month_metrics["songs"].items():
+            stats = self.global_track_stats[track_id]
+            song_rows.append({
+                "name": stats["track_name"],
+                "artist": stats["artist_name"],
+                "streams": int(metrics["streams"]),
+                "listening_ms": int(metrics["listening_ms"]),
+                "listening_hours": round(int(metrics["listening_ms"]) / 3_600_000, 2),
+                "score": round(metrics["fle"], 2)
+            })
+
+        artist_rows = self._add_balanced_scores(
+            artist_rows,
+            [("streams", False), ("listening_ms", False), ("score", False)]
+        )
+        song_rows = self._add_balanced_scores(
+            song_rows,
+            [("streams", False), ("listening_ms", False), ("score", False)]
+        )
+
+        return {
+            "artists": {
+                "by_streams": sorted(artist_rows, key=lambda x: (x["streams"], x["score"], x["name"]), reverse=True)[:top_n],
+                "by_listening_time": sorted(artist_rows, key=lambda x: (x["listening_ms"], x["score"], x["name"]), reverse=True)[:top_n],
+                "by_fle": sorted(artist_rows, key=lambda x: (x["score"], x["streams"], x["name"]), reverse=True)[:top_n],
+                "by_balanced_composite": sorted(artist_rows, key=lambda x: (x["balanced_score"], x["score"], x["name"]), reverse=True)[:top_n]
+            },
+            "songs": {
+                "by_streams": sorted(song_rows, key=lambda x: (x["streams"], x["score"], x["name"]), reverse=True)[:top_n],
+                "by_listening_time": sorted(song_rows, key=lambda x: (x["listening_ms"], x["score"], x["name"]), reverse=True)[:top_n],
+                "by_fle": sorted(song_rows, key=lambda x: (x["score"], x["streams"], x["name"]), reverse=True)[:top_n],
+                "by_balanced_composite": sorted(song_rows, key=lambda x: (x["balanced_score"], x["score"], x["name"]), reverse=True)[:top_n]
+            }
+        }
+
+    def _add_balanced_scores(self, rows, metrics):
+        if not rows:
+            return rows
+
+        normalized = []
+        for metric, lower_is_better in metrics:
+            vals = [r.get(metric, 0) for r in rows]
+            lo, hi = min(vals), max(vals)
+            rng = hi - lo
+            if rng == 0:
+                normalized.append([1.0] * len(rows))
+                continue
+
+            if lower_is_better:
+                metric_scores = [(hi - r.get(metric, 0)) / rng for r in rows]
+            else:
+                metric_scores = [(r.get(metric, 0) - lo) / rng for r in rows]
+            normalized.append(metric_scores)
+
+        for idx, row in enumerate(rows):
+            row["balanced_score"] = round(sum(scores[idx] for scores in normalized) / len(normalized), 4)
+        return rows
 
     def _calculate_fle_rankings(self, context_data, top_n):
         """Helper to format pre-calculated FLE scores using canonical IDs."""
@@ -450,6 +570,39 @@ def _format_section(title, data):
     section += "\nTop Songs:\n"
     for i, song in enumerate(data["songs"], 1):
         section += f"  {i}. {song['name']} by {song['artist']} ({song['score']} FLE)\n"
+
+    if "artist_rankings" in data and "song_rankings" in data:
+        section += "\nArtist Rankings (Most Streams):\n"
+        for i, artist in enumerate(data["artist_rankings"]["by_streams"], 1):
+            section += f"  {i}. {artist['name']} ({artist['streams']} streams)\n"
+
+        section += "\nArtist Rankings (Most Total Listening Time):\n"
+        for i, artist in enumerate(data["artist_rankings"]["by_listening_time"], 1):
+            section += f"  {i}. {artist['name']} ({artist['listening_hours']} hours)\n"
+
+        section += "\nArtist Rankings (Highest Total FLE):\n"
+        for i, artist in enumerate(data["artist_rankings"]["by_fle"], 1):
+            section += f"  {i}. {artist['name']} ({artist['score']} FLE)\n"
+
+        section += "\nArtist Rankings (Balanced Composite):\n"
+        for i, artist in enumerate(data["artist_rankings"]["by_balanced_composite"], 1):
+            section += f"  {i}. {artist['name']} ({artist['balanced_score']})\n"
+
+        section += "\nSong Rankings (Most Streams):\n"
+        for i, song in enumerate(data["song_rankings"]["by_streams"], 1):
+            section += f"  {i}. {song['name']} by {song['artist']} ({song['streams']} streams)\n"
+
+        section += "\nSong Rankings (Most Total Listening Time):\n"
+        for i, song in enumerate(data["song_rankings"]["by_listening_time"], 1):
+            section += f"  {i}. {song['name']} by {song['artist']} ({song['listening_hours']} hours)\n"
+
+        section += "\nSong Rankings (Highest Total FLE):\n"
+        for i, song in enumerate(data["song_rankings"]["by_fle"], 1):
+            section += f"  {i}. {song['name']} by {song['artist']} ({song['score']} FLE)\n"
+
+        section += "\nSong Rankings (Balanced Composite):\n"
+        for i, song in enumerate(data["song_rankings"]["by_balanced_composite"], 1):
+            section += f"  {i}. {song['name']} by {song['artist']} ({song['balanced_score']})\n"
     
     return section
 
@@ -473,12 +626,32 @@ def print_report(report, output_file=None):
     
     # 3. Yearly section
     output_str += "\n" + "=" * 60 + "\n"
+    output_str += "                  MONTHLY RANKINGS\n"
+    output_str += "=" * 60 + "\n"
+    output_str += "Most Streams per Month:\n"
+    for i, row in enumerate(report.get("monthly_rankings", {}).get("by_streams", []), 1):
+        output_str += f"  {i}. {row['month']} ({row['streams']} streams)\n"
+
+    output_str += "\nMost Total Listening Time per Month:\n"
+    for i, row in enumerate(report.get("monthly_rankings", {}).get("by_listening_time", []), 1):
+        output_str += f"  {i}. {row['month']} ({row['listening_hours']} hours)\n"
+
+    output_str += "\nHighest Total FLE per Month:\n"
+    for i, row in enumerate(report.get("monthly_rankings", {}).get("by_fle", []), 1):
+        output_str += f"  {i}. {row['month']} ({row['fle_total']} FLE)\n"
+
+    output_str += "\nBalanced Composite per Month (Streams + Time + FLE):\n"
+    for i, row in enumerate(report.get("monthly_rankings", {}).get("by_balanced_composite", []), 1):
+        output_str += f"  {i}. {row['month']} ({row['balanced_score']})\n"
+
+    # 4. Yearly section
+    output_str += "\n" + "=" * 60 + "\n"
     output_str += "                    YEARLY TOP LISTS\n"
     output_str += "=" * 60 + "\n"
     for year, data in sorted(report["yearly"].items(), reverse=True):
         output_str += _format_section(year, data)
     
-    # 4. All-time section
+    # 5. All-time section
     output_str += "\n" + "=" * 60 + "\n"
     output_str += "                   ALL-TIME TOP LISTS\n"
     output_str += "=" * 60 + "\n"
